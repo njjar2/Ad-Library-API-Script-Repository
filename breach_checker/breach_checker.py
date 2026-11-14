@@ -44,6 +44,7 @@ import tkinter as tk
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 from concurrent.futures import ThreadPoolExecutor
@@ -232,6 +233,19 @@ def split_fields(data):
     if isinstance(data, (list, tuple)):
         return [str(x) for x in data if str(x).strip()]
     return [x.strip() for x in str(data).split(",") if x.strip()]
+
+
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$")
+
+
+def site_url(m):
+    """يرجع رابط الموقع المصدر الذي حدث فيه التسريب (أو '' إن لم يكن دوميناً)."""
+    for cand in (m.get("domain"), m.get("site")):
+        c = str(cand or "").strip().strip("/")
+        c = re.sub(r"^https?://", "", c, flags=re.I).split("/")[0]
+        if _DOMAIN_RE.match(c):
+            return "https://" + c.lower()
+    return ""
 
 
 def site_key(name):
@@ -957,6 +971,8 @@ class BreachCheckerApp(tk.Tk):
             self.text.tag_configure(name, justify="right", font=self.f_bold,
                                     foreground="white", background=color,
                                     spacing1=6, spacing3=4)
+        self.text.tag_configure("link", justify="right", foreground="#1565c0",
+                                underline=True)
 
     def _toggle_opts(self):
         if self.show_opts.get():
@@ -989,11 +1005,34 @@ class BreachCheckerApp(tk.Tk):
             out.append(cur)
         return t("\n".join(out))
 
+    def _open_url(self, url):
+        try:
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _write(self, lines):
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
-        for line, tag in lines:
-            self.text.insert("end", line + "\n", tag)
+        link_i = 0
+        for item in lines:
+            line, tag = item[0], item[1]
+            url = item[2] if len(item) > 2 else None
+            if url:
+                # رابط قابل للنقر: وسم خاص لكل رابط مع فتحه في المتصفح
+                lt = f"url{link_i}"
+                link_i += 1
+                self.text.tag_configure(lt, justify="right",
+                                        foreground="#1565c0", underline=True)
+                self.text.tag_bind(lt, "<Button-1>",
+                                   lambda e, u=url: self._open_url(u))
+                self.text.tag_bind(lt, "<Enter>",
+                                   lambda e: self.text.config(cursor="hand2"))
+                self.text.tag_bind(lt, "<Leave>",
+                                   lambda e: self.text.config(cursor=""))
+                self.text.insert("end", line + "\n", (tag, lt))
+            else:
+                self.text.insert("end", line + "\n", tag)
         self.text.configure(state="disabled")
         self.text.yview_moveto(0)
 
@@ -1175,7 +1214,7 @@ class BreachCheckerApp(tk.Tk):
                 L((w("الإيميل مرتبط بملف شخصي عام يمكن لأي أحد رؤيته"), "medium"))
                 if grav["name"]:
                     L((w("الاسم الظاهر: " + grav["name"]), "right"))
-                L((grav["url"], "data"))
+                L((grav["url"], "data", grav["url"]))
                 for a in grav["accounts"]:
                     if a:
                         L((w("• حساب مرتبط: " + a), "right"))
@@ -1206,7 +1245,7 @@ class BreachCheckerApp(tk.Tk):
                  f"{len(fp)} موقع"), "site"))
             for name, url, _ in found:
                 L((w("• " + name), "right"))
-                L((url, "data"))
+                L((url, "data", url))
             if unknown:
                 L((w("تعذر التحقق من: " + ", ".join(unknown)), "data"))
             if found:
@@ -1288,8 +1327,11 @@ class BreachCheckerApp(tk.Tk):
             for i, m in enumerate(merged, 1):
                 is_new = prev_date and site_key(m["site"]) in new_sites
                 L((f"{i}. {m['site']}" + (w("  (جديد)") if is_new else ""), "site"))
-                if m.get("domain") and site_key(m["domain"]) != site_key(m["site"]):
-                    L((m["domain"], "right"))
+                url = site_url(m)
+                if url:
+                    # رابط الموقع المصدر، قابل للنقر ليفتح في المتصفح
+                    L((w("رابط الموقع:"), "right"))
+                    L((url, "data", url))
                 L((w("التاريخ: " + (m["date"] or "غير معروف")), "right"))
                 if m.get("records"):
                     L((w(f"عدد الحسابات المسربة: {int(m['records']):,}"), "right"))
@@ -1333,11 +1375,11 @@ class BreachCheckerApp(tk.Tk):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["query", "site", "domain", "date", "records",
+            w.writerow(["query", "site", "url", "domain", "date", "records",
                         "password_risk", "industry", "verified", "sources", "data"])
             for m in self.results:
-                w.writerow([m["query"], m["site"], m.get("domain", ""), m["date"],
-                            m.get("records") or "", m.get("pw_risk", ""),
+                w.writerow([m["query"], m["site"], site_url(m), m.get("domain", ""),
+                            m["date"], m.get("records") or "", m.get("pw_risk", ""),
                             m.get("industry", ""), m.get("verified", ""),
                             " | ".join(m["sources"]), m["data"]])
         messagebox.showinfo(t("تم"), t("تم الحفظ في:") + "\n" + path)
