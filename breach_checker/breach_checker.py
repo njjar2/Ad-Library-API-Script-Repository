@@ -12,9 +12,8 @@
 
 تشغيل:  python breach_checker.py
 
-على الهاتف (Pydroid 3) ثبّت هاتين المكتبتين لعرض العربي بشكل صحيح:
-    pip install arabic-reshaper
-(مكتبة python-bidi اختيارية، البرنامج فيه بديل مدمج لها)
+يعمل على الكمبيوتر وعلى الهاتف (Pydroid 3).
+لا يحتاج أي مكتبات خارجية.
 
 ملاحظة: استخدم البرنامج لفحص حساباتك أنت أو حسابات لديك إذن بفحصها.
 """
@@ -80,7 +79,9 @@ def check_leakcheck(query, kind):
         if "not found" in msg.lower():
             return []
         raise ApiError(msg or f"HTTP {status}")
-    fields = ", ".join(data.get("fields") or [])
+    # ملاحظة: LeakCheck يعطي قائمة حقول واحدة لكل التسريبات مجتمعة
+    # (وليس لكل موقع على حدة)، لذلك نحفظها منفصلة.
+    fields = list(data.get("fields") or [])
     results = []
     for src in data.get("sources") or []:
         if isinstance(src, dict):
@@ -88,7 +89,8 @@ def check_leakcheck(query, kind):
         else:
             name, date = str(src), ""
         results.append({"source": "LeakCheck", "site": name,
-                        "date": date or "غير معروف", "data": fields})
+                        "date": date or "غير معروف", "data": "",
+                        "account_fields": fields})
     return results
 
 
@@ -139,15 +141,14 @@ def check_hibp(query, kind, api_key):
 # --------------------------------------------------------------------------- #
 #                  عرض العربي بشكل صحيح (خصوصاً على أندرويد)                  #
 # --------------------------------------------------------------------------- #
-# Tkinter على أندرويد (Pydroid 3) يرسم الحروف من اليسار لليمين فتظهر الكلمات
-# العربية مقلوبة. الحل: مكتبتا arabic-reshaper و python-bidi
-#     pip install arabic-reshaper   (و python-bidi اختيارية)
-# على ويندوز/لينكس سطح المكتب لا نحتاجها لأن النظام يعرض العربي بشكل صحيح.
+# Tkinter (حتى على Pydroid 3) يعرض العربي بشكل صحيح بنفسه، لذلك المعالجة
+# معطلة افتراضياً. إذا ظهر العربي مقلوباً على جهاز معين شغّلها بـ:
+#     BREACH_FIX_ARABIC=1   مع   pip install arabic-reshaper
 IS_ANDROID = ("ANDROID_ROOT" in os.environ or "ANDROID_DATA" in os.environ
               or hasattr(sys, "getandroidapilevel"))
 # يمكن فرض التشغيل/الإيقاف يدوياً: BREACH_FIX_ARABIC=1 أو 0
 _force = os.environ.get("BREACH_FIX_ARABIC")
-FIX_ARABIC = IS_ANDROID if _force is None else _force == "1"
+FIX_ARABIC = _force == "1"
 
 _MIRROR = str.maketrans("()[]{}<>", ")(][}{><")
 _LTR_RUN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9@._\-/:+%,' ]*[A-Za-z0-9)\]])?")
@@ -196,6 +197,46 @@ def t(text):
     if not FIX_ARABIC or _reshape is None or not _AR_RE.search(text):
         return text
     return "\n".join(_get_display(_reshape(line)) for line in text.split("\n"))
+
+
+FIELD_NAMES_AR = {
+    # LeakCheck
+    "username": "اسم المستخدم", "email": "الإيميل", "password": "كلمة المرور",
+    "first_name": "الاسم الأول", "last_name": "اسم العائلة", "name": "الاسم",
+    "profile_name": "اسم الملف الشخصي", "dob": "تاريخ الميلاد",
+    "phone": "رقم الهاتف", "address": "العنوان", "zip": "الرمز البريدي",
+    "city": "المدينة", "country": "الدولة", "state": "المنطقة",
+    "gender": "الجنس", "ip": "عنوان IP", "id": "رقم الحساب (ID)",
+    "origin": "رابط صفحة تسجيل الدخول", "url": "الرابط",
+    "hash": "كلمة مرور مشفّرة", "company": "الشركة", "website": "الموقع الشخصي",
+    "line": "سطر بيانات كامل",
+    # HIBP
+    "email addresses": "الإيميل", "passwords": "كلمة المرور",
+    "usernames": "اسم المستخدم", "names": "الاسم",
+    "phone numbers": "رقم الهاتف", "ip addresses": "عنوان IP",
+    "dates of birth": "تاريخ الميلاد", "genders": "الجنس",
+    "physical addresses": "العنوان", "geographic locations": "الموقع الجغرافي",
+    "employers": "جهة العمل", "job titles": "المسمى الوظيفي",
+    "social media profiles": "حسابات التواصل الاجتماعي",
+    "password hints": "تلميح كلمة المرور",
+    "security questions and answers": "أسئلة الأمان وإجاباتها",
+    "credit cards": "بطاقات ائتمان", "partial credit card data": "جزء من بيانات البطاقة",
+    "device information": "معلومات الجهاز", "browser user agent details": "معلومات المتصفح",
+    "website activity": "نشاط الموقع", "auth tokens": "رموز تسجيل الدخول",
+}
+
+
+def field_ar(name):
+    """يترجم اسم الحقل للعربي، مع إبقاء الاسم الأصلي بين قوسين."""
+    name = str(name).strip()
+    ar = FIELD_NAMES_AR.get(name.lower())
+    return f"{ar} ({name})" if ar else name
+
+
+def split_fields(data):
+    if isinstance(data, (list, tuple)):
+        return [str(x) for x in data if str(x).strip()]
+    return [x.strip() for x in str(data).split(",") if x.strip()]
 
 
 def site_key(name):
@@ -375,22 +416,36 @@ class BreachCheckerApp(tk.Tk):
                 results.extend(r)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{name}: {e}")
-        self.after(0, self._done, kind, merge_results(results), errors, used)
+        account_fields = []
+        for r in results:
+            for f in r.get("account_fields", []):
+                if f not in account_fields:
+                    account_fields.append(f)
+        self.after(0, self._done, kind, merge_results(results), errors, used,
+                   account_fields)
 
-    def _done(self, kind, merged, errors, used):
+    def _done(self, kind, merged, errors, used, account_fields=()):
         self.progress.stop()
         self.check_btn.config(state="normal")
         self.results = merged
         kind_ar = "الإيميل" if kind == "email" else "اليوزرنيم"
 
         lines = []
+        if account_fields:
+            lines.append((t("البيانات التي تسربت عنك:"), "site"))
+            lines += [(t("• " + field_ar(f)), "right") for f in account_fields]
+            lines.append(("", "right"))
+        if merged:
+            lines.append((t("المواقع التي تسربت منها:"), "site"))
         for i, m in enumerate(merged, 1):
             lines.append((f"{i}. {m['site']}", "site"))
-            lines.append((t(f"التاريخ: {m['date'] or 'غير معروف'}"), "right"))
-            lines.append((t("المصدر: ") + ", ".join(m["sources"]), "right"))
+            lines.append((t("التاريخ: " + (m["date"] or "غير معروف")), "right"))
+            lines.append((t("المصدر:"), "right"))
+            lines += [(src, "right") for src in m["sources"]]
             if m["data"]:
                 lines.append((t("البيانات المسربة:"), "right"))
-                lines.append((m["data"], "data"))
+                lines += [(t("• " + field_ar(f)), "data")
+                          for f in split_fields(m["data"])]
 
         if merged:
             self.export_btn.config(state="normal")
