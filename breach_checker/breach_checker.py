@@ -141,22 +141,90 @@ def check_hibp(query, kind, api_key):
 # --------------------------------------------------------------------------- #
 #                  عرض العربي بشكل صحيح (خصوصاً على أندرويد)                  #
 # --------------------------------------------------------------------------- #
-# Tkinter (حتى على Pydroid 3) يعرض العربي بشكل صحيح بنفسه، لذلك المعالجة
-# معطلة افتراضياً. إذا ظهر العربي مقلوباً على جهاز معين شغّلها بـ:
-#     BREACH_FIX_ARABIC=1   مع   pip install arabic-reshaper
+# Tkinter على أندرويد (Pydroid 3) يرسم النص من اليسار لليمين دائماً، فتظهر
+# الكلمات العربية مقلوبة ("مسح" تظهر "حسم"). الحل المدمج هنا بدون أي مكتبات:
+#   1) تحويل الحروف لأشكالها المتصلة (أول/وسط/آخر الكلمة) - Arabic shaping
+#   2) عكس ترتيب النص للعرض من اليمين لليسار مع إبقاء الإنجليزي والأرقام كما هي
+# على ويندوز/لينكس سطح المكتب النظام يعرض العربي صحيحاً فلا نحتاج ذلك.
+# للفرض يدوياً: BREACH_FIX_ARABIC=1 (تشغيل) أو 0 (إيقاف)
 IS_ANDROID = ("ANDROID_ROOT" in os.environ or "ANDROID_DATA" in os.environ
               or hasattr(sys, "getandroidapilevel"))
-# يمكن فرض التشغيل/الإيقاف يدوياً: BREACH_FIX_ARABIC=1 أو 0
 _force = os.environ.get("BREACH_FIX_ARABIC")
-FIX_ARABIC = _force == "1"
+FIX_ARABIC = IS_ANDROID if _force is None else _force == "1"
+
+# الأشكال: (منفصل، آخر، أول، وسط) - الحروف التي لا تتصل بما بعدها لها شكلان فقط
+_FORMS = {
+    "ء": (0xFE80,), "آ": (0xFE81, 0xFE82), "أ": (0xFE83, 0xFE84),
+    "ؤ": (0xFE85, 0xFE86), "إ": (0xFE87, 0xFE88), "ئ": (0xFE89, 0xFE8A, 0xFE8B, 0xFE8C),
+    "ا": (0xFE8D, 0xFE8E), "ب": (0xFE8F, 0xFE90, 0xFE91, 0xFE92),
+    "ة": (0xFE93, 0xFE94), "ت": (0xFE95, 0xFE96, 0xFE97, 0xFE98),
+    "ث": (0xFE99, 0xFE9A, 0xFE9B, 0xFE9C), "ج": (0xFE9D, 0xFE9E, 0xFE9F, 0xFEA0),
+    "ح": (0xFEA1, 0xFEA2, 0xFEA3, 0xFEA4), "خ": (0xFEA5, 0xFEA6, 0xFEA7, 0xFEA8),
+    "د": (0xFEA9, 0xFEAA), "ذ": (0xFEAB, 0xFEAC), "ر": (0xFEAD, 0xFEAE),
+    "ز": (0xFEAF, 0xFEB0), "س": (0xFEB1, 0xFEB2, 0xFEB3, 0xFEB4),
+    "ش": (0xFEB5, 0xFEB6, 0xFEB7, 0xFEB8), "ص": (0xFEB9, 0xFEBA, 0xFEBB, 0xFEBC),
+    "ض": (0xFEBD, 0xFEBE, 0xFEBF, 0xFEC0), "ط": (0xFEC1, 0xFEC2, 0xFEC3, 0xFEC4),
+    "ظ": (0xFEC5, 0xFEC6, 0xFEC7, 0xFEC8), "ع": (0xFEC9, 0xFECA, 0xFECB, 0xFECC),
+    "غ": (0xFECD, 0xFECE, 0xFECF, 0xFED0), "ف": (0xFED1, 0xFED2, 0xFED3, 0xFED4),
+    "ق": (0xFED5, 0xFED6, 0xFED7, 0xFED8), "ك": (0xFED9, 0xFEDA, 0xFEDB, 0xFEDC),
+    "ل": (0xFEDD, 0xFEDE, 0xFEDF, 0xFEE0), "م": (0xFEE1, 0xFEE2, 0xFEE3, 0xFEE4),
+    "ن": (0xFEE5, 0xFEE6, 0xFEE7, 0xFEE8), "ه": (0xFEE9, 0xFEEA, 0xFEEB, 0xFEEC),
+    "و": (0xFEED, 0xFEEE), "ى": (0xFEEF, 0xFEF0), "ي": (0xFEF1, 0xFEF2, 0xFEF3, 0xFEF4),
+    "ـ": (0x0640, 0x0640, 0x0640, 0x0640),
+}
+_LAM_ALEF = {"آ": (0xFEF5, 0xFEF6), "أ": (0xFEF7, 0xFEF8),
+             "إ": (0xFEF9, 0xFEFA), "ا": (0xFEFB, 0xFEFC)}
+_HARAKAT = re.compile("[\u064B-\u0652\u0670]")
+
+
+def _joins_next(ch):
+    f = _FORMS.get(ch)
+    return f is not None and len(f) == 4
+
+
+def _builtin_reshape(text):
+    """يحوّل الحروف العربية لأشكالها المتصلة (بديل مكتبة arabic-reshaper)."""
+    text = _HARAKAT.sub("", text)
+    out, i, n = [], 0, len(text)
+    prev_joins = False
+    while i < n:
+        ch = text[i]
+        if ch == "ل" and i + 1 < n and text[i + 1] in _LAM_ALEF:
+            iso, fin = _LAM_ALEF[text[i + 1]]
+            out.append(chr(fin if prev_joins else iso))
+            prev_joins = False
+            i += 2
+            continue
+        forms = _FORMS.get(ch)
+        if not forms:
+            out.append(ch)
+            prev_joins = False
+            i += 1
+            continue
+        nxt = text[i + 1] if i + 1 < n else ""
+        next_joins = len(forms) == 4 and nxt in _FORMS
+        if len(forms) == 1:
+            out.append(chr(forms[0]))
+        elif prev_joins and next_joins:
+            out.append(chr(forms[3]))
+        elif prev_joins:
+            out.append(chr(forms[1]))
+        elif next_joins:
+            out.append(chr(forms[2]))
+        else:
+            out.append(chr(forms[0]))
+        prev_joins = _joins_next(ch)
+        i += 1
+    return "".join(out)
+
 
 _MIRROR = str.maketrans("()[]{}<>", ")(][}{><")
-_LTR_RUN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9@._\-/:+%,' ]*[A-Za-z0-9)\]])?")
+_LTR_RUN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9@._\-/:+%,' ]*[A-Za-z0-9])?")
 
 
 def _simple_bidi(line):
-    """ترتيب بصري مبسّط لسطر عربي (بديل python-bidi):
-    يعكس ترتيب المقاطع، ويعكس حروف المقاطع العربية، ويترك الإنجليزي والأرقام كما هي."""
+    """ترتيب بصري لسطر عربي: يعكس ترتيب المقاطع وحروف المقاطع العربية،
+    ويترك الإنجليزي والأرقام كما هي."""
     runs, pos = [], 0
     for m in _LTR_RUN.finditer(line):
         if m.start() > pos:
@@ -165,38 +233,20 @@ def _simple_bidi(line):
         pos = m.end()
     if pos < len(line):
         runs.append((False, line[pos:]))
-    out = []
-    for is_ltr, txt in reversed(runs):
-        out.append(txt if is_ltr else txt[::-1].translate(_MIRROR))
-    return "".join(out)
+    return "".join(txt if ltr else txt[::-1].translate(_MIRROR)
+                   for ltr, txt in reversed(runs))
 
 
-_reshape = None
-_get_display = _simple_bidi
-if FIX_ARABIC:
-    try:
-        import arabic_reshaper
-        _reshape = arabic_reshaper.reshape
-    except ImportError:
-        _reshape = None
-    try:  # اختياري: إن وُجدت python-bidi نستخدمها، وإلا البديل المبسّط
-        try:
-            from bidi import get_display as _get_display
-        except ImportError:
-            from bidi.algorithm import get_display as _get_display
-    except ImportError:
-        _get_display = _simple_bidi
-
-ARABIC_LIBS_MISSING = FIX_ARABIC and _reshape is None
-_AR_RE = re.compile(r"[\u0600-\u06FF]")
+_AR_RE = re.compile("[\u0600-\u06FF]")
 
 
 def t(text):
     """يجهّز النص العربي للعرض (سطراً سطراً)."""
     text = str(text)
-    if not FIX_ARABIC or _reshape is None or not _AR_RE.search(text):
+    if not FIX_ARABIC or not _AR_RE.search(text):
         return text
-    return "\n".join(_get_display(_reshape(line)) for line in text.split("\n"))
+    return "\n".join(_simple_bidi(_builtin_reshape(line))
+                     for line in text.split("\n"))
 
 
 FIELD_NAMES_AR = {
@@ -277,12 +327,6 @@ class BreachCheckerApp(tk.Tk):
             self.minsize(420, 500)
         self.results = []
         self._build_ui()
-        if ARABIC_LIBS_MISSING:
-            self.after(300, lambda: messagebox.showwarning(
-                "Arabic",
-                "To display Arabic correctly install:\n"
-                "pip install arabic-reshaper\n\n"
-                + t("لعرض العربي بشكل صحيح ثبّت المكتبة أعلاه")))
 
     def _build_ui(self):
         style = ttk.Style(self)
@@ -466,7 +510,7 @@ class BreachCheckerApp(tk.Tk):
 
         if errors:
             lines += [("", "right"), (t("مصادر فشلت:"), "site")]
-            lines += [(e, "data") for e in errors]
+            lines += [(t(e), "data") for e in errors]
         self._write(lines)
 
     def export_csv(self):
