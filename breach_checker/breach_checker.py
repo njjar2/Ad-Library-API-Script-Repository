@@ -318,92 +318,160 @@ def merge_results(results):
 # --------------------------------------------------------------------------- #
 #                               الواجهة الرسومية                              #
 # --------------------------------------------------------------------------- #
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".breach_checker.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError:
+        pass
+
+
 class BreachCheckerApp(tk.Tk):
+    MIN_FONT, MAX_FONT = 8, 40
+
     def __init__(self):
         super().__init__()
         self.title(t("فاحص التسريبات") if not IS_ANDROID else "Breach Checker")
         if not IS_ANDROID:
-            self.geometry("560x680")
+            self.geometry("600x760")
             self.minsize(420, 500)
         self.results = []
+        self.settings = load_settings()
+        self._setup_fonts()
         self._build_ui()
 
+    # ------------------------------ الخطوط ------------------------------ #
+    def _setup_fonts(self):
+        base = tkfont.nametofont("TkDefaultFont")
+        self.family = base.cget("family")
+        default_size = abs(int(base.cget("size"))) or 10
+        # خط أكبر من الافتراضي (أوضح على الهاتف)
+        self.font_size = int(self.settings.get("font_size",
+                                               round(default_size * 1.4)))
+        self.f_body = tkfont.Font(family=self.family)
+        self.f_bold = tkfont.Font(family=self.family, weight="bold")
+        self.f_title = tkfont.Font(family=self.family, weight="bold")
+        self._apply_font_size()
+
+    def _apply_font_size(self):
+        s = self.font_size
+        self.f_body.configure(size=s)
+        self.f_bold.configure(size=s + 2)
+        self.f_title.configure(size=s + 3)
+        # تكبير خطوط كل عناصر الواجهة (الأزرار، الحقول، العناوين)
+        for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont",
+                     "TkMenuFont", "TkHeadingFont", "TkCaptionFont"):
+            try:
+                tkfont.nametofont(name).configure(size=s)
+            except tk.TclError:
+                pass
+
+    def change_font(self, delta):
+        self.font_size = max(self.MIN_FONT,
+                             min(self.MAX_FONT, self.font_size + delta))
+        self._apply_font_size()
+        self.settings["font_size"] = self.font_size
+        save_settings(self.settings)
+
+    # ------------------------------ الواجهة ----------------------------- #
     def _build_ui(self):
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        base = tkfont.nametofont("TkDefaultFont")
-        size = base.cget("size")
-        style.configure("Title.TLabel",
-                        font=(base.cget("family"), size + 2, "bold"))
-
+        style.configure("Title.TLabel", font=self.f_title)
         pad = 8
-        # العنوان
-        ttk.Label(self, text=t("فحص تسريبات الإيميل واليوزرنيم"),
-                  style="Title.TLabel", anchor="e").pack(fill="x", padx=pad,
-                                                         pady=(pad, 4))
 
-        # --- الإدخال: كل عنصر في سطر مستقل ليناسب شاشة الهاتف ---
+        # العنوان + أزرار حجم الخط
+        head = ttk.Frame(self, padding=(pad, pad, pad, 4))
+        head.pack(fill="x")
+        ttk.Label(head, text=t("فحص التسريبات"), style="Title.TLabel",
+                  anchor="e").pack(side="right", fill="x", expand=True)
+        ttk.Button(head, text="A+", width=3,
+                   command=lambda: self.change_font(+2)).pack(side="left")
+        ttk.Button(head, text="A-", width=3,
+                   command=lambda: self.change_font(-2)).pack(side="left", padx=4)
+
         form = ttk.Frame(self, padding=(pad, 0))
         form.pack(fill="x")
+        self.email_var = tk.StringVar()
+        self.user_var = tk.StringVar()
+        self.key_var = tk.StringVar(value=self.settings.get("hibp_key", ""))
 
-        self.query_var = tk.StringVar()
-        self.kind_var = tk.StringVar(value="auto")
-        self.key_var = tk.StringVar()
+        ttk.Label(form, text=t("الإيميل:"), anchor="e").pack(fill="x")
+        e1 = ttk.Entry(form, textvariable=self.email_var, font=self.f_body)
+        e1.pack(fill="x", pady=(2, 4))
+        ttk.Label(form, text=t("اليوزرنيم:"), anchor="e").pack(fill="x")
+        e2 = ttk.Entry(form, textvariable=self.user_var, font=self.f_body)
+        e2.pack(fill="x", pady=(2, 4))
+        for e in (e1, e2):
+            e.bind("<Return>", lambda ev: self.start_check())
 
-        ttk.Label(form, text=t("الإيميل أو اليوزرنيم:"), anchor="e").pack(fill="x")
-        entry = ttk.Entry(form, textvariable=self.query_var)
-        entry.pack(fill="x", pady=(2, 6))
-        entry.bind("<Return>", lambda e: self.start_check())
-
-        kinds = ttk.Frame(form)
-        kinds.pack(fill="x")
-        for text, val in (("تلقائي", "auto"), ("إيميل", "email"),
-                          ("يوزرنيم", "username")):
-            ttk.Radiobutton(kinds, text=t(text), value=val,
-                            variable=self.kind_var).pack(side="right", padx=4)
-
-        ttk.Label(form, text=t("مفتاح HIBP (اختياري):"), anchor="e").pack(
-            fill="x", pady=(6, 0))
-        ttk.Entry(form, textvariable=self.key_var, show="*").pack(fill="x",
-                                                                  pady=(2, 6))
+        # مفتاح HIBP مخفي افتراضياً لتوفير مساحة للنتائج
+        self.show_key = tk.BooleanVar(value=bool(self.key_var.get()))
+        ttk.Checkbutton(form, text=t("مفتاح HIBP (اختياري)"),
+                        variable=self.show_key,
+                        command=self._toggle_key).pack(anchor="e")
+        self.key_entry = ttk.Entry(form, textvariable=self.key_var, show="*",
+                                   font=self.f_body)
+        self.key_anchor = ttk.Frame(form)
+        self.key_anchor.pack(fill="x")
+        self._toggle_key()
 
         btns = ttk.Frame(form)
-        btns.pack(fill="x")
+        btns.pack(fill="x", pady=(4, 0))
         self.check_btn = ttk.Button(btns, text=t("فحص"), command=self.start_check)
         self.check_btn.pack(side="right", fill="x", expand=True)
         ttk.Button(btns, text=t("مسح"), command=self.clear).pack(
             side="right", fill="x", expand=True, padx=4)
-        self.export_btn = ttk.Button(btns, text=t("تصدير CSV"),
+        self.export_btn = ttk.Button(btns, text="CSV",
                                      command=self.export_csv, state="disabled")
         self.export_btn.pack(side="right", fill="x", expand=True)
 
         self.progress = ttk.Progressbar(self, mode="indeterminate")
-        self.progress.pack(fill="x", padx=pad, pady=(6, 0))
         self.status_var = tk.StringVar(value=t("جاهز"))
-        ttk.Label(self, textvariable=self.status_var, anchor="e",
-                  wraplength=300).pack(fill="x", padx=pad, pady=4)
-        self.status_label = self.winfo_children()[-1]
+        self.status_label = ttk.Label(self, textvariable=self.status_var,
+                                      anchor="e", wraplength=300)
+        self.status_label.pack(fill="x", padx=pad, pady=4)
         self.bind("<Configure>", self._on_resize)
 
-        # --- النتائج: بطاقات نصية تناسب الشاشات الضيقة ---
+        # --- النتائج: تأخذ كل المساحة المتبقية ---
         res = ttk.Frame(self, padding=(pad, 0, pad, pad))
         res.pack(fill="both", expand=True)
         self.text = tk.Text(res, wrap="word", state="disabled", relief="flat",
-                            padx=6, pady=6, background="white")
+                            padx=6, pady=6, background="white",
+                            font=self.f_body, height=1)
         vsb = ttk.Scrollbar(res, orient="vertical", command=self.text.yview)
         self.text.configure(yscrollcommand=vsb.set)
         vsb.pack(side="left", fill="y")
         self.text.pack(side="left", fill="both", expand=True)
         self.text.tag_configure("right", justify="right")
-        self.text.tag_configure("site", justify="right",
-                                font=(base.cget("family"), size + 1, "bold"),
-                                foreground="#b00020", spacing1=8)
+        self.text.tag_configure("query", justify="right", font=self.f_title,
+                                foreground="white", background="#37474f",
+                                spacing1=10, spacing3=6)
+        self.text.tag_configure("site", justify="right", font=self.f_bold,
+                                foreground="#b00020", spacing1=10)
         self.text.tag_configure("data", justify="right", foreground="#444444")
-        self.text.tag_configure("ok", justify="right", foreground="#1b7f3a",
-                                font=(base.cget("family"), size + 1, "bold"))
+        self.text.tag_configure("ok", justify="right", font=self.f_bold,
+                                foreground="#1b7f3a")
+
+    def _toggle_key(self):
+        if self.show_key.get():
+            self.key_entry.pack(in_=self.key_anchor, fill="x", pady=(2, 4))
+        else:
+            self.key_entry.pack_forget()
 
     def _on_resize(self, event):
         if event.widget is self:
@@ -417,7 +485,7 @@ class BreachCheckerApp(tk.Tk):
         self.text.configure(state="disabled")
         self.text.yview_moveto(0)
 
-    # ----------------------------------------------------------------- #
+    # ------------------------------ الفحص ------------------------------- #
     def clear(self):
         self._write([])
         self.results = []
@@ -425,26 +493,35 @@ class BreachCheckerApp(tk.Tk):
         self.status_var.set(t("جاهز"))
 
     def start_check(self):
-        query = self.query_var.get().strip()
-        if not query:
+        email = self.email_var.get().strip()
+        user = self.user_var.get().strip()
+        if not email and not user:
             messagebox.showwarning(t("تنبيه"), t("اكتب إيميل أو يوزرنيم أولاً"))
             return
-        kind = self.kind_var.get()
-        if kind == "auto":
-            kind = "email" if EMAIL_RE.match(query) else "username"
-        elif kind == "email" and not EMAIL_RE.match(query):
+        if email and not EMAIL_RE.match(email):
             messagebox.showwarning(t("تنبيه"), t("صيغة الإيميل غير صحيحة"))
             return
+        jobs = []
+        if email:
+            jobs.append((email, "email"))
+        if user:
+            jobs.append((user, "username"))
+
+        key = self.key_var.get().strip()
+        if key != self.settings.get("hibp_key", ""):
+            self.settings["hibp_key"] = key
+            save_settings(self.settings)
 
         self.clear()
         self.check_btn.config(state="disabled")
+        self.progress.pack(fill="x", padx=8, before=self.status_label)
         self.progress.start(12)
         self.status_var.set(t("جاري الفحص..."))
-        threading.Thread(target=self._worker,
-                         args=(query, kind, self.key_var.get().strip()),
+        threading.Thread(target=self._worker, args=(jobs, key),
                          daemon=True).start()
 
-    def _worker(self, query, kind, api_key):
+    @staticmethod
+    def _check_one(query, kind, api_key):
         checks = [
             ("LeakCheck", lambda: check_leakcheck(query, kind)),
             ("XposedOrNot", lambda: check_xposedornot(query, kind)),
@@ -460,57 +537,73 @@ class BreachCheckerApp(tk.Tk):
                 results.extend(r)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{name}: {e}")
-        account_fields = []
+        fields = []
         for r in results:
             for f in r.get("account_fields", []):
-                if f not in account_fields:
-                    account_fields.append(f)
-        self.after(0, self._done, kind, merge_results(results), errors, used,
-                   account_fields)
+                if f not in fields:
+                    fields.append(f)
+        return {"query": query, "kind": kind, "merged": merge_results(results),
+                "errors": errors, "used": used, "fields": fields}
 
-    def _done(self, kind, merged, errors, used, account_fields=()):
+    def _worker(self, jobs, api_key):
+        reports = [self._check_one(q, k, api_key) for q, k in jobs]
+        self.after(0, self._done, reports)
+
+    def _done(self, reports):
         self.progress.stop()
+        self.progress.pack_forget()
         self.check_btn.config(state="normal")
-        self.results = merged
-        kind_ar = "الإيميل" if kind == "email" else "اليوزرنيم"
+        self.results = []
+        lines, status, any_found = [], [], False
 
-        lines = []
-        if account_fields:
-            lines.append((t("البيانات التي تسربت عنك:"), "site"))
-            lines += [(t("• " + field_ar(f)), "right") for f in account_fields]
+        for rep in reports:
+            kind_ar = "الإيميل" if rep["kind"] == "email" else "اليوزرنيم"
+            merged = rep["merged"]
+            for m in merged:
+                self.results.append(dict(m, query=rep["query"]))
+
+            # عنوان القسم: يعرض الإيميل/اليوزرنيم الذي تم فحصه
+            lines.append((t(kind_ar + ":"), "query"))
+            lines.append((rep["query"], "query"))
+
+            if merged:
+                any_found = True
+                status.append(t(f"{kind_ar}: {len(merged)} تسريب"))
+                lines.append((t(f"ظهر في {len(merged)} تسريب "
+                                f"(من {rep['used']} مصدر)"), "site"))
+            elif rep["used"]:
+                status.append(t(f"{kind_ar}: سليم"))
+                lines.append((t("لا توجد تسريبات معروفة"), "ok"))
+            else:
+                status.append(t(f"{kind_ar}: فشل الفحص"))
+
+            if rep["fields"]:
+                lines.append((t("البيانات التي تسربت:"), "site"))
+                lines += [(t("• " + field_ar(f)), "right") for f in rep["fields"]]
+            if merged:
+                lines.append((t("المواقع التي تسربت منها:"), "site"))
+            for i, m in enumerate(merged, 1):
+                lines.append((f"{i}. {m['site']}", "site"))
+                lines.append((t("التاريخ: " + (m["date"] or "غير معروف")), "right"))
+                lines.append((t("المصدر:"), "right"))
+                lines += [(src, "right") for src in m["sources"]]
+                if m["data"]:
+                    lines.append((t("البيانات المسربة:"), "right"))
+                    lines += [(t("• " + field_ar(f)), "data")
+                              for f in split_fields(m["data"])]
+            if rep["errors"]:
+                lines.append((t("مصادر فشلت:"), "site"))
+                lines += [(t(e), "data") for e in rep["errors"]]
             lines.append(("", "right"))
-        if merged:
-            lines.append((t("المواقع التي تسربت منها:"), "site"))
-        for i, m in enumerate(merged, 1):
-            lines.append((f"{i}. {m['site']}", "site"))
-            lines.append((t("التاريخ: " + (m["date"] or "غير معروف")), "right"))
-            lines.append((t("المصدر:"), "right"))
-            lines += [(src, "right") for src in m["sources"]]
-            if m["data"]:
-                lines.append((t("البيانات المسربة:"), "right"))
-                lines += [(t("• " + field_ar(f)), "data")
-                          for f in split_fields(m["data"])]
 
-        if merged:
+        if any_found:
             self.export_btn.config(state="normal")
-            self.status_var.set(t(f"تحذير: {kind_ar} ظهر في {len(merged)} تسريب "
-                                  f"(من {used} مصدر)"))
-            lines += [("", "right"),
-                      (t("نصائح:"), "site"),
+            lines += [(t("نصائح:"), "site"),
                       (t("- غيّر كلمة المرور في هذه المواقع"), "right"),
                       (t("- لا تستخدم نفس كلمة المرور في أكثر من موقع"), "right"),
                       (t("- فعّل المصادقة الثنائية (2FA)"), "right"),
                       (t("- استخدم مدير كلمات مرور"), "right")]
-        elif used:
-            self.status_var.set(t(f"لم يتم العثور على {kind_ar} في أي تسريب "
-                                  f"(من {used} مصدر)"))
-            lines.append((t("لا توجد تسريبات معروفة"), "ok"))
-        else:
-            self.status_var.set(t("فشل الفحص"))
-
-        if errors:
-            lines += [("", "right"), (t("مصادر فشلت:"), "site")]
-            lines += [(t(e), "data") for e in errors]
+        self.status_var.set(" | ".join(status))
         self._write(lines)
 
     def export_csv(self):
@@ -523,10 +616,10 @@ class BreachCheckerApp(tk.Tk):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["site", "date", "sources", "data"])
+            w.writerow(["query", "site", "date", "sources", "data"])
             for m in self.results:
-                w.writerow([m["site"], m["date"], " | ".join(m["sources"]),
-                            m["data"]])
+                w.writerow([m["query"], m["site"], m["date"],
+                            " | ".join(m["sources"]), m["data"]])
         messagebox.showinfo(t("تم"), t("تم الحفظ في:") + "\n" + path)
 
 
