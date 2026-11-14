@@ -13,7 +13,8 @@
 تشغيل:  python breach_checker.py
 
 على الهاتف (Pydroid 3) ثبّت هاتين المكتبتين لعرض العربي بشكل صحيح:
-    pip install arabic-reshaper python-bidi
+    pip install arabic-reshaper
+(مكتبة python-bidi اختيارية، البرنامج فيه بديل مدمج لها)
 
 ملاحظة: استخدم البرنامج لفحص حساباتك أنت أو حسابات لديك إذن بفحصها.
 """
@@ -140,7 +141,7 @@ def check_hibp(query, kind, api_key):
 # --------------------------------------------------------------------------- #
 # Tkinter على أندرويد (Pydroid 3) يرسم الحروف من اليسار لليمين فتظهر الكلمات
 # العربية مقلوبة. الحل: مكتبتا arabic-reshaper و python-bidi
-#     pip install arabic-reshaper python-bidi
+#     pip install arabic-reshaper   (و python-bidi اختيارية)
 # على ويندوز/لينكس سطح المكتب لا نحتاجها لأن النظام يعرض العربي بشكل صحيح.
 IS_ANDROID = ("ANDROID_ROOT" in os.environ or "ANDROID_DATA" in os.environ
               or hasattr(sys, "getandroidapilevel"))
@@ -148,20 +149,45 @@ IS_ANDROID = ("ANDROID_ROOT" in os.environ or "ANDROID_DATA" in os.environ
 _force = os.environ.get("BREACH_FIX_ARABIC")
 FIX_ARABIC = IS_ANDROID if _force is None else _force == "1"
 
-_reshape = _get_display = None
+_MIRROR = str.maketrans("()[]{}<>", ")(][}{><")
+_LTR_RUN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9@._\-/:+%,' ]*[A-Za-z0-9)\]])?")
+
+
+def _simple_bidi(line):
+    """ترتيب بصري مبسّط لسطر عربي (بديل python-bidi):
+    يعكس ترتيب المقاطع، ويعكس حروف المقاطع العربية، ويترك الإنجليزي والأرقام كما هي."""
+    runs, pos = [], 0
+    for m in _LTR_RUN.finditer(line):
+        if m.start() > pos:
+            runs.append((False, line[pos:m.start()]))
+        runs.append((True, m.group()))
+        pos = m.end()
+    if pos < len(line):
+        runs.append((False, line[pos:]))
+    out = []
+    for is_ltr, txt in reversed(runs):
+        out.append(txt if is_ltr else txt[::-1].translate(_MIRROR))
+    return "".join(out)
+
+
+_reshape = None
+_get_display = _simple_bidi
 if FIX_ARABIC:
     try:
         import arabic_reshaper
         _reshape = arabic_reshaper.reshape
+    except ImportError:
+        _reshape = None
+    try:  # اختياري: إن وُجدت python-bidi نستخدمها، وإلا البديل المبسّط
         try:
             from bidi import get_display as _get_display
         except ImportError:
             from bidi.algorithm import get_display as _get_display
     except ImportError:
-        _reshape = _get_display = None
+        _get_display = _simple_bidi
 
 ARABIC_LIBS_MISSING = FIX_ARABIC and _reshape is None
-_AR_RE = re.compile(r"[؀-ۿ]")
+_AR_RE = re.compile(r"[\u0600-\u06FF]")
 
 
 def t(text):
@@ -214,8 +240,8 @@ class BreachCheckerApp(tk.Tk):
             self.after(300, lambda: messagebox.showwarning(
                 "Arabic",
                 "To display Arabic correctly install:\n"
-                "pip install arabic-reshaper python-bidi\n\n"
-                + t("لعرض العربي بشكل صحيح ثبّت المكتبتين أعلاه")))
+                "pip install arabic-reshaper\n\n"
+                + t("لعرض العربي بشكل صحيح ثبّت المكتبة أعلاه")))
 
     def _build_ui(self):
         style = ttk.Style(self)
