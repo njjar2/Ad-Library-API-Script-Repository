@@ -14,7 +14,9 @@
   6. Gravatar                 : هل للإيميل ملف شخصي عام؟ - مجاني
   7. DNS (dns.google)         : أمان دومين الإيميل الخاص (SPF / DMARC) - مجاني
   8. البصمة الرقمية           : أين اليوزرنيم مسجّل (GitHub, Reddit, ...) - مجاني
-  9. Have I Been Pwned (v3)   : إيميل - يحتاج مفتاح API (اختياري)
+  9. EmailRep.io              : سمعة الإيميل وهل تسربت له بيانات - مجاني
+ 10. psbdmp (Pastes)          : الظهور في منشورات Pastebin المسرّبة - مجاني
+ 11. Have I Been Pwned (v3)   : إيميل - يحتاج مفتاح API (اختياري)
 
 الفحص المعمّق يضيف:
   - فحص الجزء قبل @ من الإيميل كيوزرنيم
@@ -474,8 +476,25 @@ def load_hibp_catalog():
     return index
 
 
+BREACH_FLAGS_AR = {
+    "IsVerified": None,  # يُعرض في مكان آخر
+    "IsFabricated": "قد يكون ملفّقاً (غير مؤكَّد المصدر)",
+    "IsSensitive": "موقع حسّاس",
+    "IsRetired": "تسريب مسحوب/مُلغى",
+    "IsSpamList": "قائمة بريد دعائي",
+    "IsMalware": "مرتبط ببرمجية خبيثة",
+    "IsStealerLog": "من سجلات برامج السرقة",
+    "IsSubscriptionFree": None,
+}
+
+
+def _strip_html(text):
+    text = re.sub(r"<[^>]+>", "", str(text or ""))
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def enrich_with_catalog(merged):
-    """يضيف عدد الحسابات وأنواع البيانات والتاريخ للمواقع الناقصة."""
+    """يضيف عدد الحسابات وأنواع البيانات والوصف والوسوم للمواقع من كتالوج HIBP."""
     index = load_hibp_catalog()
     for m in merged:
         b = index.get(site_key(m["site"]))
@@ -493,6 +512,16 @@ def enrich_with_catalog(merged):
             m["domain"] = b.get("Domain") or ""
         if m.get("verified") is None:
             m["verified"] = bool(b.get("IsVerified"))
+        if not m.get("title"):
+            m["title"] = b.get("Title") or ""
+        if not m.get("added"):
+            m["added"] = (b.get("AddedDate") or "")[:10]
+        if not m.get("description"):
+            m["description"] = _strip_html(b.get("Description"))[:300]
+        flags = [lbl for key, lbl in BREACH_FLAGS_AR.items()
+                 if lbl and b.get(key)]
+        if flags:
+            m["flags"] = flags
         if b.get("IsSensitive"):
             m["sensitive"] = True
         if "HIBP" not in m["sources"]:
@@ -807,6 +836,63 @@ def history_key(query):
     return hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()[:20]
 
 
+# ---------- 7) سمعة الإيميل (EmailRep.io) ---------- #
+def check_emailrep(email):
+    """يرجع dict بمعلومات سمعة الإيميل، أو None إن لم تتوفر الخدمة.
+    يبيّن: هل الإيميل مشبوه، مسرّب، على الويب المظلم، وعلى أي خدمات مسجّل."""
+    url = "https://emailrep.io/" + urllib.parse.quote(email)
+    status, data = http_get_json(url, {"User-Agent": USER_AGENT,
+                                       "Accept": "application/json"})
+    # 401/403/429 = الخدمة تحتاج مفتاحاً أو تجاوزنا الحد: نتجاهلها بهدوء
+    if status in (401, 403, 429) or not isinstance(data, dict):
+        return None
+    if status == 400:
+        return None
+    if status != 200:
+        return None
+    det = data.get("details") or {}
+    profiles = det.get("profiles") or []
+    return {
+        "reputation": data.get("reputation") or "",
+        "suspicious": bool(data.get("suspicious")),
+        "references": data.get("references") or 0,
+        "spotted": det.get("days_since_domain_creation"),
+        "credentials_leaked": bool(det.get("credentials_leaked")),
+        "data_breach": bool(det.get("data_breach")),
+        "malicious_activity": bool(det.get("malicious_activity")),
+        "spam": bool(det.get("spam")),
+        "profiles": [str(p) for p in profiles],
+        "first_seen": det.get("first_seen") or "",
+        "last_seen": det.get("last_seen") or "",
+    }
+
+
+# ---------- 8) الظهور في منشورات مسرّبة (Pastebin dumps) ---------- #
+def check_pastes(query):
+    """يبحث عن ظهور الإيميل في منشورات Pastebin المسرّبة عبر psbdmp.
+    يرجع قائمة dict(id, date, url) أو []."""
+    url = "https://psbdmp.ws/api/v3/search/" + urllib.parse.quote(query)
+    status, data = http_get_json(url)
+    if status in (403, 429):
+        return None
+    if status != 200 or not isinstance(data, dict):
+        return []
+    items = data.get("data")
+    if not isinstance(items, list):
+        return []
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        pid = str(it.get("id") or "").strip()
+        if not pid:
+            continue
+        out.append({"id": pid, "date": str(it.get("time") or "")[:10],
+                    "url": "https://psbdmp.ws/" + pid,
+                    "tags": str(it.get("tags") or "")})
+    return out
+
+
 # --------------------------------------------------------------------------- #
 #                               الواجهة الرسومية                              #
 # --------------------------------------------------------------------------- #
@@ -1094,8 +1180,10 @@ class BreachCheckerApp(tk.Tk):
         extras = []
         if deep:
             extras.append(("hudson", lambda: check_hudsonrock(query, kind)))
+            extras.append(("pastes", lambda: check_pastes(query)))
             if kind == "email":
                 extras.append(("gravatar", lambda: check_gravatar(query)))
+                extras.append(("emailrep", lambda: check_emailrep(query)))
                 # الفحص مفيد فقط لدومينات خاصة (شركة/موقع شخصي)
                 if query.split("@")[-1].lower() not in PUBLIC_PROVIDERS:
                     extras.append(("domain", lambda: check_domain(query)))
@@ -1103,7 +1191,7 @@ class BreachCheckerApp(tk.Tk):
                 extras.append(("footprint", lambda: check_footprint(query)))
 
         results, errors, used, extra = [], [], 0, {}
-        with ThreadPoolExecutor(max_workers=6) as pool:
+        with ThreadPoolExecutor(max_workers=8) as pool:
             futures = [(name, pool.submit(fn)) for name, fn in checks]
             extra_futs = [(name, pool.submit(fn)) for name, fn in extras]
             for name, fut in futures:
@@ -1144,6 +1232,19 @@ class BreachCheckerApp(tk.Tk):
                               f"{fam} بتاريخ {date or 'غير معروف'}")
             score = min(100, max(score, 60) + 20)
             level = "high"
+
+        pastes = extra.get("pastes")
+        if pastes:
+            reasons.append(f"ظهر في {len(pastes)} منشور عام مسرّب (Paste)")
+            score = min(100, score + min(len(pastes), 5) * 3)
+            if score >= 50:
+                level = "high"
+            elif score >= 20 and level == "low":
+                level = "medium"
+
+        rd = extra.get("emailrep")
+        if rd and rd.get("credentials_leaked"):
+            reasons.append("EmailRep: تسربت بيانات دخول لهذا الإيميل")
         return {"query": query, "kind": kind, "merged": merged,
                 "errors": errors, "used": used, "fields": fields,
                 "level": level, "score": score, "reasons": reasons,
@@ -1251,6 +1352,67 @@ class BreachCheckerApp(tk.Tk):
             if found:
                 L((w("ملاحظة: نفس اليوزرنيم قد يعود لشخص آخر في بعض المواقع"), "data"))
 
+        rep_data = extra.get("emailrep")
+        if rep_data:
+            L((w("سمعة الإيميل (EmailRep):"), "site"))
+            rmap = {"high": "جيدة", "medium": "متوسطة", "low": "منخفضة",
+                    "none": "لا توجد بيانات"}
+            L((w("التقييم العام: " + rmap.get(rep_data["reputation"],
+                                             rep_data["reputation"])), "right"))
+            if rep_data["suspicious"]:
+                L((w("مُصنّف كإيميل مشبوه"), "medium"))
+            flags = [(rep_data["credentials_leaked"], "تسربت له بيانات دخول"),
+                     (rep_data["data_breach"], "ظهر في خرق بيانات"),
+                     (rep_data["malicious_activity"], "نشاط ضار مسجّل"),
+                     (rep_data["spam"], "مرتبط بإرسال سبام")]
+            for on, label in flags:
+                if on:
+                    L((w("• " + label), "right"))
+            if rep_data["profiles"]:
+                L((w("مسجّل على خدمات: " + ", ".join(rep_data["profiles"])),
+                   "right"))
+            if rep_data["first_seen"] and rep_data["first_seen"] != "never":
+                L((w("أول ظهور: " + str(rep_data["first_seen"])), "right"))
+
+        pastes = extra.get("pastes")
+        if pastes:
+            L((w(f"منشورات مسرّبة (Pastes): ظهر في {len(pastes)} منشور"), "site"))
+            L((w("ظهور الإيميل في هذه المنشورات يعني أنه نُشر علناً، غالباً مع "
+                 "بيانات أخرى"), "data"))
+            for p in pastes[:15]:
+                label = "• " + (p["date"] or "تاريخ غير معروف")
+                if p["tags"]:
+                    label += " - " + p["tags"]
+                L((w(label), "right"))
+                L((p["url"], "data", p["url"]))
+            if len(pastes) > 15:
+                L((w(f"و{len(pastes) - 15} منشوراً آخر"), "data"))
+
+    @staticmethod
+    def _summary(rep):
+        """يبني أسطر الملخص الإحصائي لحساب واحد."""
+        merged = rep["merged"]
+        extra = rep.get("extra") or {}
+        total_acc = sum(int(m["records"]) for m in merged
+                        if str(m.get("records") or "").isdigit())
+        years = [y for y in (_year(m.get("date")) for m in merged) if y]
+        pw_sites = sum(1 for m in merged if "password" in (m.get("data") or "").lower())
+        out = []
+        out.append(f"عدد التسريبات: {len(merged)}")
+        if total_acc:
+            out.append(f"إجمالي الحسابات المكشوفة في هذه المواقع: {total_acc:,}")
+        if years:
+            out.append(f"الفترة: من {min(years)} إلى {max(years)}")
+        if pw_sites:
+            out.append(f"مواقع كشفت كلمة المرور: {pw_sites}")
+        hr = extra.get("hudson")
+        if hr and hr["infected"]:
+            out.append(f"أجهزة مصابة ببرامج سرقة: {len(hr['stealers'])}")
+        pastes = extra.get("pastes")
+        if pastes:
+            out.append(f"منشورات مسرّبة (Pastes): {len(pastes)}")
+        return out
+
     def _done(self, reports, pw=None, strength=None):
         self.progress.stop()
         self.progress.pack_forget()
@@ -1317,6 +1479,11 @@ class BreachCheckerApp(tk.Tk):
                 else:
                     L((w(f"لا تسريبات جديدة منذ آخر فحص ({prev_date})"), "ok"))
 
+            summary = self._summary(rep)
+            if summary:
+                L((w("ملخّص:"), "site"))
+                lines.extend((w("• " + s), "right") for s in summary)
+
             self._render_extra(rep, L)
 
             if rep["fields"]:
@@ -1340,8 +1507,12 @@ class BreachCheckerApp(tk.Tk):
                 if m.get("pw_risk") and m["pw_risk"] != "unknown":
                     L((w("كلمات المرور: " + PW_RISK_AR.get(m["pw_risk"], m["pw_risk"])),
                        "right"))
+                if m.get("added"):
+                    L((w("أُضيف لقاعدة البيانات: " + m["added"]), "right"))
                 if m.get("verified") is not None:
                     L((w("تسريب موثّق: " + ("نعم" if m["verified"] else "لا")), "right"))
+                for fl in m.get("flags", []):
+                    L((w("• " + fl), "data"))
                 if STEALER_RE.search(m["site"]):
                     L((w("تنبيه: سجلات برامج سرقة من أجهزة مصابة"), "medium"))
                 L((w("المصدر: " + ", ".join(m["sources"])), "right"))
@@ -1349,6 +1520,8 @@ class BreachCheckerApp(tk.Tk):
                     L((w("البيانات المسربة:"), "right"))
                     lines.extend((w("• " + field_ar(f)), "data")
                                  for f in split_fields(m["data"]))
+                if m.get("description"):
+                    L((w("الوصف: " + m["description"]), "data"))
             if rep["errors"]:
                 L((w("مصادر فشلت:"), "site"))
                 lines.extend((w(e), "data") for e in rep["errors"])
@@ -1375,13 +1548,16 @@ class BreachCheckerApp(tk.Tk):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["query", "site", "url", "domain", "date", "records",
-                        "password_risk", "industry", "verified", "sources", "data"])
+            w.writerow(["query", "site", "url", "domain", "date", "added",
+                        "records", "password_risk", "industry", "verified",
+                        "flags", "sources", "data", "description"])
             for m in self.results:
                 w.writerow([m["query"], m["site"], site_url(m), m.get("domain", ""),
-                            m["date"], m.get("records") or "", m.get("pw_risk", ""),
-                            m.get("industry", ""), m.get("verified", ""),
-                            " | ".join(m["sources"]), m["data"]])
+                            m["date"], m.get("added", ""), m.get("records") or "",
+                            m.get("pw_risk", ""), m.get("industry", ""),
+                            m.get("verified", ""), " | ".join(m.get("flags", [])),
+                            " | ".join(m["sources"]), m["data"],
+                            m.get("description", "")])
         messagebox.showinfo(t("تم"), t("تم الحفظ في:") + "\n" + path)
 
 
