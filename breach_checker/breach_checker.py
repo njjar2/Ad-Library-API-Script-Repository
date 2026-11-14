@@ -748,7 +748,7 @@ class BreachCheckerApp(tk.Tk):
         if event.widget is self:
             self.status_label.configure(wraplength=max(event.width - 20, 100))
 
-    def _w(self, text):
+    def _wrap(self, text):
         """على أندرويد: نقسّم السطر الطويل يدوياً قبل قلبه، لأن Tk يقسّم بعد
         القلب فيظهر آخر الجملة في أول سطر."""
         if not FIX_ARABIC:
@@ -881,17 +881,17 @@ class BreachCheckerApp(tk.Tk):
 
         # --- نتيجة كلمة المرور ---
         if pw is not None:
-            lines.append((self._w("كلمة المرور:"), "query"))
+            lines.append((self._wrap("كلمة المرور:"), "query"))
             if isinstance(pw, Exception):
-                lines.append((self._w("فشل الفحص: ") + str(pw), "data"))
-                status.append(self._w("كلمة المرور: فشل الفحص"))
+                lines.append((self._wrap("فشل الفحص: ") + str(pw), "data"))
+                status.append(self._wrap("كلمة المرور: فشل الفحص"))
             elif pw:
-                lines.append((self._w(f"مكشوفة! ظهرت {pw:,} مرة في التسريبات"), "high"))
-                lines.append((self._w("لا تستخدمها أبداً وغيّرها في كل مكان"), "right"))
-                status.append(self._w("كلمة المرور: مكشوفة"))
+                lines.append((self._wrap(f"مكشوفة! ظهرت {pw:,} مرة في التسريبات"), "high"))
+                lines.append((self._wrap("لا تستخدمها أبداً وغيّرها في كل مكان"), "right"))
+                status.append(self._wrap("كلمة المرور: مكشوفة"))
             else:
-                lines.append((self._w("لم تظهر في أي تسريب معروف"), "ok"))
-                status.append(self._w("كلمة المرور: سليمة"))
+                lines.append((self._wrap("لم تظهر في أي تسريب معروف"), "ok"))
+                status.append(self._wrap("كلمة المرور: سليمة"))
             lines.append(("", "right"))
 
         for rep in reports:
@@ -901,68 +901,68 @@ class BreachCheckerApp(tk.Tk):
                 self.results.append(dict(m, query=rep["query"]))
 
             # عنوان القسم: يعرض الإيميل/اليوزرنيم الذي تم فحصه
-            lines.append((self._w(kind_ar + ":"), "query"))
+            lines.append((self._wrap(kind_ar + ":"), "query"))
             lines.append((rep["query"], "query"))
 
             if merged:
-                status.append(self._w(f"{rep['query']}: {len(merged)} تسريب"))
+                status.append(self._wrap(f"{rep['query']}: {len(merged)} تسريب"))
                 level = rep["level"]
-                lines.append((self._w(f"مستوى الخطر: {self.LEVEL_AR[level]} "
+                lines.append((self._wrap(f"مستوى الخطر: {self.LEVEL_AR[level]} "
                                 f"({rep['score']}/100)"), level))
-                lines.append((self._w("الأسباب:"), "site"))
-                lines += [(self._w("• " + r), "right") for r in rep["reasons"]]
+                lines.append((self._wrap("الأسباب:"), "site"))
+                lines += [(self._wrap("• " + r), "right") for r in rep["reasons"]]
                 all_reasons += rep["reasons"]
                 xon = next((m.get("xon_risk") for m in merged if m.get("xon_risk")),
                            None)
                 if xon and xon[0]:
-                    lines.append((self._w(f"تقييم XposedOrNot: {xon[0]} ({xon[1]})"),
+                    lines.append((self._wrap(f"تقييم XposedOrNot: {xon[0]} ({xon[1]})"),
                                   "right"))
             elif rep["used"]:
-                status.append(self._w(f"{rep['query']}: سليم"))
-                lines.append((self._w("لا توجد تسريبات معروفة"), "ok"))
+                status.append(self._wrap(f"{rep['query']}: سليم"))
+                lines.append((self._wrap("لا توجد تسريبات معروفة"), "ok"))
             else:
-                status.append(self._w(f"{rep['query']}: فشل الفحص"))
+                status.append(self._wrap(f"{rep['query']}: فشل الفحص"))
 
             if rep["fields"]:
-                lines.append((self._w("البيانات التي تسربت:"), "site"))
-                lines += [(self._w("• " + field_ar(f)), "right") for f in rep["fields"]]
+                lines.append((self._wrap("البيانات التي تسربت:"), "site"))
+                lines += [(self._wrap("• " + field_ar(f)), "right") for f in rep["fields"]]
             if merged:
-                lines.append((self._w(f"المواقع التي تسربت منها ({len(merged)}):"), "site"))
+                lines.append((self._wrap(f"المواقع التي تسربت منها ({len(merged)}):"), "site"))
             for i, m in enumerate(merged, 1):
                 lines.append((f"{i}. {m['site']}", "site"))
                 if m.get("domain") and site_key(m["domain"]) != site_key(m["site"]):
                     lines.append((m["domain"], "right"))
-                lines.append((self._w("التاريخ: " + (m["date"] or "غير معروف")), "right"))
+                lines.append((self._wrap("التاريخ: " + (m["date"] or "غير معروف")), "right"))
                 if m.get("records"):
-                    lines.append((self._w(f"عدد الحسابات المسربة: {int(m['records']):,}"),
+                    lines.append((self._wrap(f"عدد الحسابات المسربة: {int(m['records']):,}"),
                                   "right"))
                 if m.get("industry"):
-                    lines.append((self._w("نوع الموقع: ") + m["industry"], "right"))
+                    lines.append((self._wrap("نوع الموقع: ") + m["industry"], "right"))
                 if m.get("pw_risk") and m["pw_risk"] != "unknown":
-                    lines.append((self._w("كلمات المرور: " + PW_RISK_AR.get(
+                    lines.append((self._wrap("كلمات المرور: " + PW_RISK_AR.get(
                         m["pw_risk"], m["pw_risk"])), "right"))
                 if m.get("verified") is not None:
-                    lines.append((self._w("تسريب موثّق: " + ("نعم" if m["verified"]
+                    lines.append((self._wrap("تسريب موثّق: " + ("نعم" if m["verified"]
                                                      else "لا")), "right"))
                 if STEALER_RE.search(m["site"]):
-                    lines.append((self._w("تنبيه: سجلات برامج سرقة من أجهزة مصابة"),
+                    lines.append((self._wrap("تنبيه: سجلات برامج سرقة من أجهزة مصابة"),
                                   "medium"))
-                lines.append((self._w("المصدر: ") + ", ".join(m["sources"]), "right"))
+                lines.append((self._wrap("المصدر: ") + ", ".join(m["sources"]), "right"))
                 if m["data"]:
-                    lines.append((self._w("البيانات المسربة:"), "right"))
-                    lines += [(self._w("• " + field_ar(f)), "data")
+                    lines.append((self._wrap("البيانات المسربة:"), "right"))
+                    lines += [(self._wrap("• " + field_ar(f)), "data")
                               for f in split_fields(m["data"])]
             if rep["errors"]:
-                lines.append((self._w("مصادر فشلت:"), "site"))
-                lines += [(self._w(e), "data") for e in rep["errors"]]
+                lines.append((self._wrap("مصادر فشلت:"), "site"))
+                lines += [(self._wrap(e), "data") for e in rep["errors"]]
             lines.append(("", "right"))
 
         found = any(r["merged"] for r in reports) or (isinstance(pw, int) and pw)
         if any(r["merged"] for r in reports):
             self.export_btn.config(state="normal")
         if found:
-            lines.append((self._w("ماذا تفعل الآن:"), "site"))
-            lines += [(self._w(f"{i}. {r}"), "right") for i, r in
+            lines.append((self._wrap("ماذا تفعل الآن:"), "site"))
+            lines += [(self._wrap(f"{i}. {r}"), "right") for i, r in
                       enumerate(recommendations(" ".join(all_reasons)), 1)]
         self.status_var.set(" | ".join(status))
         self._write(lines)
