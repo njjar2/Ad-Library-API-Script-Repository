@@ -10,11 +10,17 @@
   2. XposedOrNot (analytics)  : إيميل + تفاصيل كل تسريب - مجاني
   3. كتالوج HIBP العام         : تفاصيل المواقع (عدد الحسابات، نوع البيانات) - مجاني
   4. Pwned Passwords          : فحص كلمة مرور بأمان (لا تُرسل كلمة المرور) - مجاني
-  5. Have I Been Pwned (v3)   : إيميل - يحتاج مفتاح API (اختياري)
+  5. Hudson Rock              : هل الحساب على جهاز مصاب ببرنامج سرقة؟ - مجاني
+  6. Gravatar                 : هل للإيميل ملف شخصي عام؟ - مجاني
+  7. DNS (dns.google)         : أمان دومين الإيميل الخاص (SPF / DMARC) - مجاني
+  8. البصمة الرقمية           : أين اليوزرنيم مسجّل (GitHub, Reddit, ...) - مجاني
+  9. Have I Been Pwned (v3)   : إيميل - يحتاج مفتاح API (اختياري)
 
 الفحص المعمّق يضيف:
   - فحص الجزء قبل @ من الإيميل كيوزرنيم
   - تحليل مستوى الخطر (Stealer Logs، كلمات مرور مكشوفة، تسريبات حديثة...)
+  - مقارنة بآخر فحص لمعرفة التسريبات الجديدة
+  - تحليل قوة كلمة المرور محلياً
   - نصائح مخصصة حسب نتيجة الفحص
 
 تشغيل:  python breach_checker.py
@@ -28,6 +34,7 @@
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -564,13 +571,226 @@ def recommendations(reasons_text):
     recs = ["غيّر كلمة المرور في المواقع المسربة وأي موقع يستخدم نفس الكلمة",
             "فعّل المصادقة الثنائية (2FA) خصوصاً للإيميل",
             "استخدم مدير كلمات مرور وكلمة مختلفة لكل موقع"]
-    if "Stealer" in reasons_text:
+    if "Stealer" in reasons_text or "Hudson Rock" in reasons_text:
         recs.insert(0, "افحص أجهزتك ببرنامج مكافحة فيروسات، ثم غيّر كل كلمات "
                        "المرور المحفوظة في المتصفح من جهاز نظيف")
         recs.append("سجّل الخروج من كل الجلسات المفتوحة في حساباتك المهمة")
     if "حساسة" in reasons_text:
         recs.append("احذر من رسائل الاحتيال التي تستخدم بياناتك الشخصية")
+    if "كلمة المرور مكشوفة" in reasons_text:
+        recs.insert(0, "توقف فوراً عن استخدام كلمة المرور المكشوفة")
     return recs
+
+
+# ========================================================================== #
+#                       فحوصات معمّقة إضافية                                 #
+# ========================================================================== #
+
+# ---------- 1) Hudson Rock: هل الحساب على جهاز مصاب ببرنامج سرقة؟ ---------- #
+def check_hudsonrock(query, kind):
+    """يرجع dict: infected(bool), stealers(list), message.
+    مجاني بدون مفتاح، ويعطي تاريخ إصابة الجهاز ونوع البرنامج الخبيث ونظام التشغيل."""
+    base = "https://cavalier.hudsonrock.com/api/json/v2/osint-tools/"
+    if kind == "email":
+        url = base + "search-by-email?email=" + urllib.parse.quote(query)
+    else:
+        url = base + "search-by-username?username=" + urllib.parse.quote(query)
+    status, data = http_get_json(url)
+    if status == 404:
+        return {"infected": False, "stealers": [], "message": ""}
+    if status == 429:
+        raise ApiError("تجاوزت حد الطلبات، انتظر قليلاً")
+    if status != 200 or not isinstance(data, dict):
+        raise ApiError(f"HTTP {status}")
+    stealers = [s for s in (data.get("stealers") or []) if isinstance(s, dict)]
+    return {"infected": bool(stealers), "stealers": stealers,
+            "message": str(data.get("message") or "")}
+
+
+# ---------- 2) البصمة الرقمية: أين اليوزرنيم مسجّل؟ ---------- #
+def _exists_status(url, ok=200):
+    status, _ = http_get_text(url)
+    if status == ok:
+        return True
+    if status == 404:
+        return False
+    return None  # غير معروف (حظر أو حد طلبات)
+
+
+def _exists_json(url, test):
+    status, data = http_get_json(url)
+    if status == 404:
+        return False
+    if status != 200:
+        return None
+    try:
+        return bool(test(data))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# (الاسم، رابط الملف الشخصي، دالة الفحص)
+FOOTPRINT_SITES = [
+    ("GitHub", "https://github.com/{u}",
+     lambda u: _exists_status(f"https://api.github.com/users/{u}")),
+    ("GitLab", "https://gitlab.com/{u}",
+     lambda u: _exists_json(f"https://gitlab.com/api/v4/users?username={u}",
+                            lambda d: len(d) > 0)),
+    ("Reddit", "https://www.reddit.com/user/{u}",
+     lambda u: _exists_json(f"https://www.reddit.com/user/{u}/about.json",
+                            lambda d: bool(d.get("data")))),
+    ("Keybase", "https://keybase.io/{u}",
+     lambda u: _exists_json(
+         f"https://keybase.io/_/api/1.0/user/lookup.json?usernames={u}",
+         lambda d: any(d.get("them") or []))),
+    ("Chess.com", "https://www.chess.com/member/{u}",
+     lambda u: _exists_status(f"https://api.chess.com/pub/player/{u.lower()}")),
+    ("Lichess", "https://lichess.org/@/{u}",
+     lambda u: _exists_status(f"https://lichess.org/api/user/{u}")),
+    ("Hacker News", "https://news.ycombinator.com/user?id={u}",
+     lambda u: _exists_json(f"https://hacker-news.firebaseio.com/v0/user/{u}.json",
+                            lambda d: d is not None)),
+    ("Docker Hub", "https://hub.docker.com/u/{u}",
+     lambda u: _exists_status(f"https://hub.docker.com/v2/users/{u}/")),
+    ("Dev.to", "https://dev.to/{u}",
+     lambda u: _exists_status(f"https://dev.to/api/users/by_username?url={u}")),
+    ("PyPI", "https://pypi.org/user/{u}/",
+     lambda u: _exists_status(f"https://pypi.org/user/{u}/")),
+    ("Codeforces", "https://codeforces.com/profile/{u}",
+     lambda u: _exists_json(f"https://codeforces.com/api/user.info?handles={u}",
+                            lambda d: d.get("status") == "OK")),
+    ("npm", "https://www.npmjs.com/~{u}",
+     lambda u: _exists_status(f"https://www.npmjs.com/~{u}")),
+]
+
+
+def check_footprint(username):
+    """يرجع قائمة (الموقع، الرابط، موجود؟) لكل موقع."""
+    u = urllib.parse.quote(username.strip(), safe="")
+
+    def one(site):
+        name, profile, fn = site
+        try:
+            found = fn(u)
+        except Exception:  # noqa: BLE001
+            found = None
+        return name, profile.format(u=u), found
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(one, FOOTPRINT_SITES))
+
+
+# ---------- 3) Gravatar: هل للإيميل ملف شخصي عام؟ ---------- #
+def check_gravatar(email):
+    h = hashlib.md5(email.strip().lower().encode("utf-8")).hexdigest()
+    status, data = http_get_json(f"https://en.gravatar.com/{h}.json")
+    if status != 200 or not isinstance(data, dict):
+        return None
+    entry = (data.get("entry") or [{}])[0]
+    return {"name": entry.get("displayName") or "",
+            "url": entry.get("profileUrl") or f"https://gravatar.com/{h}",
+            "accounts": [a.get("shortname") or a.get("domain") or ""
+                         for a in entry.get("accounts") or []]}
+
+
+# ---------- 4) أمان دومين الإيميل (MX / SPF / DMARC) عبر DNS-over-HTTPS ---------- #
+def _doh(name, rtype):
+    status, data = http_get_json("https://dns.google/resolve?name="
+                                 + urllib.parse.quote(name) + "&type=" + rtype)
+    if status != 200 or not isinstance(data, dict):
+        raise ApiError(f"DNS HTTP {status}")
+    return [a.get("data", "").strip('"') for a in data.get("Answer") or []]
+
+
+PUBLIC_PROVIDERS = {
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+    "msn.com", "yahoo.com", "ymail.com", "icloud.com", "me.com", "mac.com",
+    "aol.com", "proton.me", "protonmail.com", "gmx.com", "gmx.de", "mail.ru",
+    "yandex.com", "yandex.ru", "zoho.com", "hotmail.fr", "outlook.sa",
+}
+
+
+def check_domain(email):
+    domain = email.split("@")[-1].lower()
+    mx = _doh(domain, "MX")
+    txt = _doh(domain, "TXT")
+    dmarc = _doh("_dmarc." + domain, "TXT")
+    spf = next((x for x in txt if x.lower().startswith("v=spf1")), "")
+    dmarc_rec = next((x for x in dmarc if x.lower().startswith("v=dmarc1")), "")
+    policy = ""
+    m = re.search(r"p=(\w+)", dmarc_rec)
+    if m:
+        policy = m.group(1).lower()
+    return {"domain": domain, "mx": mx, "spf": spf, "dmarc": dmarc_rec,
+            "policy": policy}
+
+
+# ---------- 5) تحليل قوة كلمة المرور محلياً (لا يُرسل شيء) ---------- #
+COMMON_PASSWORDS = {
+    "123456", "123456789", "12345678", "password", "qwerty", "111111",
+    "123123", "abc123", "password1", "1234567", "iloveyou", "000000",
+    "qwerty123", "1q2w3e4r", "admin", "welcome", "monkey", "dragon",
+    "football", "letmein", "baseball", "sunshine", "princess", "azerty",
+}
+SEQUENCES = ("0123456789", "abcdefghijklmnopqrstuvwxyz", "qwertyuiop",
+             "asdfghjkl", "zxcvbnm", "1qaz2wsx")
+
+
+def password_strength(pw):
+    """يرجع (التقييم، النقاط من 100، قائمة الملاحظات)."""
+    notes, score = [], 0
+    n = len(pw)
+    pools = 0
+    if re.search(r"[a-z]", pw):
+        pools += 26
+    if re.search(r"[A-Z]", pw):
+        pools += 26
+    if re.search(r"\d", pw):
+        pools += 10
+    if re.search(r"[^A-Za-z0-9]", pw):
+        pools += 33
+
+    entropy = n * math.log2(pools) if pools else 0
+    score = min(100, int(entropy * 100 / 80))
+
+    if n < 8:
+        notes.append("قصيرة جداً (أقل من 8 أحرف)")
+    elif n < 12:
+        notes.append("الأفضل 12 حرفاً أو أكثر")
+    if not re.search(r"[A-Z]", pw):
+        notes.append("لا تحتوي حروفاً كبيرة")
+    if not re.search(r"\d", pw):
+        notes.append("لا تحتوي أرقاماً")
+    if not re.search(r"[^A-Za-z0-9]", pw):
+        notes.append("لا تحتوي رموزاً (!@#...)")
+    low = pw.lower()
+    if low in COMMON_PASSWORDS:
+        score = min(score, 5)
+        notes.append("من أشهر كلمات المرور في العالم")
+    for seq in SEQUENCES:
+        for i in range(len(seq) - 3):
+            if seq[i:i + 4] in low or seq[i:i + 4][::-1] in low:
+                score = max(0, score - 20)
+                notes.append("تحتوي تسلسلاً سهلاً (مثل 1234 أو qwer)")
+                break
+        else:
+            continue
+        break
+    if re.search(r"(.)\1{2,}", pw):
+        score = max(0, score - 15)
+        notes.append("تحتوي حرفاً مكرراً 3 مرات أو أكثر")
+    if re.search(r"(19|20)\d{2}", pw):
+        score = max(0, score - 10)
+        notes.append("تحتوي سنة (قد تكون تاريخ ميلاد)")
+    label = ("قوية جداً" if score >= 80 else "قوية" if score >= 60
+             else "متوسطة" if score >= 40 else "ضعيفة")
+    return label, score, notes
+
+
+# ---------- 6) سجل الفحوصات: معرفة التسريبات الجديدة منذ آخر فحص ---------- #
+def history_key(query):
+    # نحفظ بصمة مشفرة فقط، وليس الإيميل/اليوزرنيم نفسه
+    return hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()[:20]
 
 
 # --------------------------------------------------------------------------- #
@@ -684,7 +904,7 @@ class BreachCheckerApp(tk.Tk):
         ttk.Checkbutton(form, text=t("خيارات إضافية"), variable=self.show_opts,
                         command=self._toggle_opts).pack(anchor="e")
         self.opts = ttk.Frame(form)
-        ttk.Checkbutton(self.opts, text=t("فحص معمّق (يفحص ما قبل @ كيوزرنيم)"),
+        ttk.Checkbutton(self.opts, text=t("فحص معمّق (سجلات السرقة، البصمة الرقمية، أمان الدومين...)"),
                         variable=self.deep_var).pack(anchor="e")
         ttk.Label(self.opts, text=t("كلمة مرور للفحص (لا تُرسل، يُرسل جزء من بصمتها فقط):"),
                   anchor="e", wraplength=600).pack(fill="x")
@@ -832,9 +1052,21 @@ class BreachCheckerApp(tk.Tk):
             ("XposedOrNot", lambda: check_xposedornot(query, kind)),
             ("HIBP", lambda: check_hibp(query, kind, api_key)),
         ]
-        results, errors, used = [], [], 0
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        extras = []
+        if deep:
+            extras.append(("hudson", lambda: check_hudsonrock(query, kind)))
+            if kind == "email":
+                extras.append(("gravatar", lambda: check_gravatar(query)))
+                # الفحص مفيد فقط لدومينات خاصة (شركة/موقع شخصي)
+                if query.split("@")[-1].lower() not in PUBLIC_PROVIDERS:
+                    extras.append(("domain", lambda: check_domain(query)))
+            else:
+                extras.append(("footprint", lambda: check_footprint(query)))
+
+        results, errors, used, extra = [], [], 0, {}
+        with ThreadPoolExecutor(max_workers=6) as pool:
             futures = [(name, pool.submit(fn)) for name, fn in checks]
+            extra_futs = [(name, pool.submit(fn)) for name, fn in extras]
             for name, fut in futures:
                 try:
                     r = fut.result()
@@ -844,6 +1076,12 @@ class BreachCheckerApp(tk.Tk):
                     results.extend(r)
                 except Exception as e:  # noqa: BLE001
                     errors.append(f"{name}: {e}")
+            for name, fut in extra_futs:
+                try:
+                    extra[name] = fut.result()
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{name}: {e}")
+
         fields = []
         for r in results:
             for f in r.get("account_fields", []):
@@ -856,9 +1094,21 @@ class BreachCheckerApp(tk.Tk):
             except Exception as e:  # noqa: BLE001
                 errors.append(f"HIBP catalog: {e}")
         level, score, reasons = analyze(merged, fields)
+
+        # إصابة جهاز ببرنامج سرقة = أعلى درجة خطر
+        hr = extra.get("hudson")
+        if hr and hr["infected"]:
+            st = hr["stealers"][0]
+            date = str(st.get("date_compromised") or "")[:10]
+            fam = st.get("stealer_family") or ""
+            reasons.insert(0, f"Hudson Rock: جهاز مرتبط بالحساب أُصيب ببرنامج سرقة "
+                              f"{fam} بتاريخ {date or 'غير معروف'}")
+            score = min(100, max(score, 60) + 20)
+            level = "high"
         return {"query": query, "kind": kind, "merged": merged,
                 "errors": errors, "used": used, "fields": fields,
-                "level": level, "score": score, "reasons": reasons}
+                "level": level, "score": score, "reasons": reasons,
+                "extra": extra}
 
     def _worker(self, jobs, api_key, password, deep):
         reports = [self._check_one(q, k, api_key, deep) for q, k in jobs]
@@ -868,102 +1118,208 @@ class BreachCheckerApp(tk.Tk):
                 pw = check_password(password)
             except Exception as e:  # noqa: BLE001
                 pw = e
-        self.after(0, self._done, reports, pw)
+        strength = password_strength(password) if password else None
+        self.after(0, self._done, reports, pw, strength)
 
     LEVEL_AR = {"high": "عالي", "medium": "متوسط", "low": "منخفض"}
 
-    def _done(self, reports, pw=None):
+    # ------------------------------------------------------------------ #
+    def _update_history(self, rep):
+        """يقارن بآخر فحص لنفس الإيميل/اليوزرنيم ويرجع (تاريخ آخر فحص، المواقع الجديدة)."""
+        hist = self.settings.setdefault("history", {})
+        key = history_key(rep["query"])
+        prev = hist.get(key)
+        current = sorted({site_key(m["site"]) for m in rep["merged"]})
+        new_sites = set()
+        prev_date = None
+        if prev:
+            prev_date = prev.get("date")
+            new_sites = set(current) - set(prev.get("sites", []))
+        hist[key] = {"date": time.strftime("%Y-%m-%d %H:%M"), "sites": current}
+        return prev_date, new_sites
+
+    def _render_extra(self, rep, L):
+        extra = rep.get("extra") or {}
+        w = self._wrap
+
+        hr = extra.get("hudson")
+        if hr is not None:
+            L((w("سجلات برامج السرقة (Hudson Rock):"), "site"))
+            if not hr["infected"]:
+                L((w("لا يوجد جهاز مصاب مرتبط بهذا الحساب"), "ok"))
+            for i, st in enumerate(hr["stealers"], 1):
+                L((w(f"جهاز مصاب رقم {i}"), "high"))
+                info = [
+                    ("تاريخ الإصابة", str(st.get("date_compromised") or "")[:10]),
+                    ("نوع البرنامج الخبيث", st.get("stealer_family")),
+                    ("نظام التشغيل", st.get("operating_system")),
+                    ("اسم الجهاز", st.get("computer_name")),
+                    ("عنوان IP", st.get("ip")),
+                    ("مكان البرنامج الخبيث", st.get("malware_path")),
+                    ("برامج الحماية", ", ".join(st.get("antiviruses"))
+                     if isinstance(st.get("antiviruses"), list)
+                     else st.get("antiviruses")),
+                    ("حسابات شخصية مسروقة من الجهاز", st.get("total_user_services")),
+                    ("حسابات عمل مسروقة من الجهاز", st.get("total_corporate_services")),
+                    ("أسماء دخول (مخفية جزئياً)", ", ".join(st.get("top_logins") or [])),
+                    ("كلمات مرور (مخفية جزئياً)", ", ".join(st.get("top_passwords") or [])),
+                ]
+                for label, val in info:
+                    if val not in (None, "", []):
+                        L((w(f"{label}: {val}"), "right"))
+
+        grav = extra.get("gravatar")
+        if "gravatar" in extra:
+            L((w("ملف Gravatar العام:"), "site"))
+            if grav:
+                L((w("الإيميل مرتبط بملف شخصي عام يمكن لأي أحد رؤيته"), "medium"))
+                if grav["name"]:
+                    L((w("الاسم الظاهر: " + grav["name"]), "right"))
+                L((grav["url"], "data"))
+                for a in grav["accounts"]:
+                    if a:
+                        L((w("• حساب مرتبط: " + a), "right"))
+            else:
+                L((w("لا يوجد ملف عام"), "ok"))
+
+        dom = extra.get("domain")
+        if dom:
+            L((w(f"أمان دومين الإيميل ({dom['domain']}):"), "site"))
+            L((w("خادم البريد (MX): " + ("موجود" if dom["mx"] else "غير موجود!")),
+               "right" if dom["mx"] else "high"))
+            L((w("حماية SPF: " + ("موجودة" if dom["spf"] else "غير موجودة")),
+               "right" if dom["spf"] else "medium"))
+            pol = {"reject": "رفض الرسائل المزورة (ممتاز)",
+                   "quarantine": "عزل الرسائل المزورة (جيد)",
+                   "none": "مراقبة فقط (ضعيف)"}.get(dom["policy"], "")
+            if dom["dmarc"]:
+                L((w("حماية DMARC: " + (pol or dom["policy"] or "موجودة")),
+                   "medium" if dom["policy"] == "none" else "right"))
+            else:
+                L((w("حماية DMARC: غير موجودة (يمكن انتحال هذا الدومين)"), "medium"))
+
+        fp = extra.get("footprint")
+        if fp is not None:
+            found = [x for x in fp if x[2]]
+            unknown = [x[0] for x in fp if x[2] is None]
+            L((w(f"البصمة الرقمية: اليوزرنيم موجود في {len(found)} من "
+                 f"{len(fp)} موقع"), "site"))
+            for name, url, _ in found:
+                L((w("• " + name), "right"))
+                L((url, "data"))
+            if unknown:
+                L((w("تعذر التحقق من: " + ", ".join(unknown)), "data"))
+            if found:
+                L((w("ملاحظة: نفس اليوزرنيم قد يعود لشخص آخر في بعض المواقع"), "data"))
+
+    def _done(self, reports, pw=None, strength=None):
         self.progress.stop()
         self.progress.pack_forget()
         self.check_btn.config(state="normal")
         self.results = []
         lines, status, all_reasons = [], [], []
+        L = lines.append
+        w = self._wrap
 
         # --- نتيجة كلمة المرور ---
-        if pw is not None:
-            lines.append((self._wrap("كلمة المرور:"), "query"))
+        if pw is not None or strength:
+            L((w("كلمة المرور:"), "query"))
             if isinstance(pw, Exception):
-                lines.append((self._wrap("فشل الفحص: ") + str(pw), "data"))
-                status.append(self._wrap("كلمة المرور: فشل الفحص"))
+                L((w("فشل فحص التسريب: " + str(pw)), "data"))
+                status.append(w("كلمة المرور: فشل الفحص"))
             elif pw:
-                lines.append((self._wrap(f"مكشوفة! ظهرت {pw:,} مرة في التسريبات"), "high"))
-                lines.append((self._wrap("لا تستخدمها أبداً وغيّرها في كل مكان"), "right"))
-                status.append(self._wrap("كلمة المرور: مكشوفة"))
-            else:
-                lines.append((self._wrap("لم تظهر في أي تسريب معروف"), "ok"))
-                status.append(self._wrap("كلمة المرور: سليمة"))
-            lines.append(("", "right"))
+                L((w(f"مكشوفة! ظهرت {pw:,} مرة في التسريبات"), "high"))
+                L((w("لا تستخدمها أبداً وغيّرها في كل مكان"), "right"))
+                status.append(w("كلمة المرور: مكشوفة"))
+                all_reasons.append("كلمة المرور مكشوفة")
+            elif pw == 0:
+                L((w("لم تظهر في أي تسريب معروف"), "ok"))
+                status.append(w("كلمة المرور: سليمة"))
+            if strength:
+                label, sc, notes = strength
+                tag = "low" if sc >= 60 else "medium" if sc >= 40 else "high"
+                L((w(f"قوة كلمة المرور: {label} ({sc}/100)"), tag))
+                lines.extend((w("• " + n), "right") for n in notes)
+            L(("", "right"))
 
         for rep in reports:
             kind_ar = "الإيميل" if rep["kind"] == "email" else "اليوزرنيم"
             merged = rep["merged"]
+            prev_date, new_sites = self._update_history(rep)
             for m in merged:
                 self.results.append(dict(m, query=rep["query"]))
 
             # عنوان القسم: يعرض الإيميل/اليوزرنيم الذي تم فحصه
-            lines.append((self._wrap(kind_ar + ":"), "query"))
-            lines.append((rep["query"], "query"))
+            L((w(kind_ar + ":"), "query"))
+            L((rep["query"], "query"))
 
-            if merged:
-                status.append(self._wrap(f"{rep['query']}: {len(merged)} تسريب"))
-                level = rep["level"]
-                lines.append((self._wrap(f"مستوى الخطر: {self.LEVEL_AR[level]} "
-                                f"({rep['score']}/100)"), level))
-                lines.append((self._wrap("الأسباب:"), "site"))
-                lines += [(self._wrap("• " + r), "right") for r in rep["reasons"]]
+            if merged or rep["level"] == "high":
+                status.append(w(f"{rep['query']}: {len(merged)} تسريب"))
+                level = rep["level"] if rep["level"] != "none" else "low"
+                L((w(f"مستوى الخطر: {self.LEVEL_AR[level]} ({rep['score']}/100)"),
+                   level))
+                L((w("الأسباب:"), "site"))
+                lines.extend((w("• " + r), "right") for r in rep["reasons"])
                 all_reasons += rep["reasons"]
                 xon = next((m.get("xon_risk") for m in merged if m.get("xon_risk")),
                            None)
                 if xon and xon[0]:
-                    lines.append((self._wrap(f"تقييم XposedOrNot: {xon[0]} ({xon[1]})"),
-                                  "right"))
+                    L((w(f"تقييم XposedOrNot: {xon[0]} ({xon[1]})"), "right"))
             elif rep["used"]:
-                status.append(self._wrap(f"{rep['query']}: سليم"))
-                lines.append((self._wrap("لا توجد تسريبات معروفة"), "ok"))
+                status.append(w(f"{rep['query']}: سليم"))
+                L((w("لا توجد تسريبات معروفة"), "ok"))
             else:
-                status.append(self._wrap(f"{rep['query']}: فشل الفحص"))
+                status.append(w(f"{rep['query']}: فشل الفحص"))
+
+            if prev_date:
+                if new_sites:
+                    L((w(f"جديد منذ آخر فحص ({prev_date}): {len(new_sites)} تسريب"),
+                       "high"))
+                else:
+                    L((w(f"لا تسريبات جديدة منذ آخر فحص ({prev_date})"), "ok"))
+
+            self._render_extra(rep, L)
 
             if rep["fields"]:
-                lines.append((self._wrap("البيانات التي تسربت:"), "site"))
-                lines += [(self._wrap("• " + field_ar(f)), "right") for f in rep["fields"]]
+                L((w("البيانات التي تسربت:"), "site"))
+                lines.extend((w("• " + field_ar(f)), "right") for f in rep["fields"])
             if merged:
-                lines.append((self._wrap(f"المواقع التي تسربت منها ({len(merged)}):"), "site"))
+                L((w(f"المواقع التي تسربت منها ({len(merged)}):"), "site"))
             for i, m in enumerate(merged, 1):
-                lines.append((f"{i}. {m['site']}", "site"))
+                is_new = prev_date and site_key(m["site"]) in new_sites
+                L((f"{i}. {m['site']}" + (w("  (جديد)") if is_new else ""), "site"))
                 if m.get("domain") and site_key(m["domain"]) != site_key(m["site"]):
-                    lines.append((m["domain"], "right"))
-                lines.append((self._wrap("التاريخ: " + (m["date"] or "غير معروف")), "right"))
+                    L((m["domain"], "right"))
+                L((w("التاريخ: " + (m["date"] or "غير معروف")), "right"))
                 if m.get("records"):
-                    lines.append((self._wrap(f"عدد الحسابات المسربة: {int(m['records']):,}"),
-                                  "right"))
+                    L((w(f"عدد الحسابات المسربة: {int(m['records']):,}"), "right"))
                 if m.get("industry"):
-                    lines.append((self._wrap("نوع الموقع: ") + m["industry"], "right"))
+                    L((w("نوع الموقع: " + m["industry"]), "right"))
                 if m.get("pw_risk") and m["pw_risk"] != "unknown":
-                    lines.append((self._wrap("كلمات المرور: " + PW_RISK_AR.get(
-                        m["pw_risk"], m["pw_risk"])), "right"))
+                    L((w("كلمات المرور: " + PW_RISK_AR.get(m["pw_risk"], m["pw_risk"])),
+                       "right"))
                 if m.get("verified") is not None:
-                    lines.append((self._wrap("تسريب موثّق: " + ("نعم" if m["verified"]
-                                                     else "لا")), "right"))
+                    L((w("تسريب موثّق: " + ("نعم" if m["verified"] else "لا")), "right"))
                 if STEALER_RE.search(m["site"]):
-                    lines.append((self._wrap("تنبيه: سجلات برامج سرقة من أجهزة مصابة"),
-                                  "medium"))
-                lines.append((self._wrap("المصدر: ") + ", ".join(m["sources"]), "right"))
+                    L((w("تنبيه: سجلات برامج سرقة من أجهزة مصابة"), "medium"))
+                L((w("المصدر: " + ", ".join(m["sources"])), "right"))
                 if m["data"]:
-                    lines.append((self._wrap("البيانات المسربة:"), "right"))
-                    lines += [(self._wrap("• " + field_ar(f)), "data")
-                              for f in split_fields(m["data"])]
+                    L((w("البيانات المسربة:"), "right"))
+                    lines.extend((w("• " + field_ar(f)), "data")
+                                 for f in split_fields(m["data"]))
             if rep["errors"]:
-                lines.append((self._wrap("مصادر فشلت:"), "site"))
-                lines += [(self._wrap(e), "data") for e in rep["errors"]]
-            lines.append(("", "right"))
+                L((w("مصادر فشلت:"), "site"))
+                lines.extend((w(e), "data") for e in rep["errors"])
+            L(("", "right"))
 
-        found = any(r["merged"] for r in reports) or (isinstance(pw, int) and pw)
-        if any(r["merged"] for r in reports):
+        save_settings(self.settings)  # حفظ سجل الفحوصات
+        any_breach = any(r["merged"] for r in reports)
+        if any_breach:
             self.export_btn.config(state="normal")
-        if found:
-            lines.append((self._wrap("ماذا تفعل الآن:"), "site"))
-            lines += [(self._wrap(f"{i}. {r}"), "right") for i, r in
-                      enumerate(recommendations(" ".join(all_reasons)), 1)]
+        if any_breach or all_reasons:
+            L((w("ماذا تفعل الآن:"), "site"))
+            lines.extend((w(f"{i}. {r}"), "right") for i, r in
+                         enumerate(recommendations(" ".join(all_reasons)), 1))
         self.status_var.set(" | ".join(status))
         self._write(lines)
 
